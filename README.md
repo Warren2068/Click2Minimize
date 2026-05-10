@@ -74,16 +74,16 @@ When you click the dock icon of an already-focused app, macOS does nothing — t
 
 ---
 
-### `/// 1.5 — WHAT CHANGED FROM 1.4`
+### `/// 2.1 — WHAT CHANGED FROM 2.0`
 
-- **Fixed**: `isActiveAppFullscreen()` was inspecting Click2Minimize's own NSWindows — always returned false. Rewritten to read `AXFullScreen` on the frontmost app via Accessibility.
+- **Fixed**: `isActiveAppFullscreen()` was inspecting Click2Minimize's own `NSWindow`s — always returned false. Rewritten to read `AXFullScreen` on the frontmost app via Accessibility.
 - **Fixed**: dock-item ignore-list was `"Launchpad||Trash||Downloads".contains(name)` — substring match, would catch "TrashCan" or any app with "Trash" in the name. Replaced with proper `Set` membership.
 - **Fixed**: dock-update debounce was firing every event and only suppressing later ones inside the 0.5s window — it never actually coalesced bursts. Rewritten with `DispatchWorkItem` trailing-edge debounce at 300ms.
 - **Improved**: all `print()` calls migrated to `os.Logger` with privacy modifiers. Release builds no longer write to stdout.
 - **Improved**: launch-at-login is now an opt-in toggle in Settings instead of unconditional. Existing installs that were auto-registered stay registered until toggled off.
 - **Improved**: settings sheet redesigned — launch-at-login row, cleaner spacing, footnote anchored.
 - **Improved**: deprecated `NSWorkspace.launchApplication(_:)` swapped for `openApplication(at:configuration:completionHandler:)`.
-- **Bumped**: marketing version 1.4 → 1.5.
+- **Bumped**: marketing version → 2.1 to align the in-app version with the GitHub release tag (was 1.4 in-plist while the latest release was already tagged v2.0).
 
 ---
 
