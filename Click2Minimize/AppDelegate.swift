@@ -2,9 +2,15 @@ import Cocoa
 import CoreGraphics
 import SwiftUI
 import ApplicationServices
-import Combine // Add Combine framework
+import Combine
 import ServiceManagement
 import Foundation
+import os.log
+
+private let log = Logger(subsystem: "com.idemfactor.Click2Minimize", category: "app")
+
+/// Dock items we never act on — these have no useful "active windows" semantic.
+private let ignoredDockItems: Set<String> = ["Launchpad", "Trash", "Downloads"]
 
 @main // This indicates that this is the entry point of the application
 struct Click2MinimizeApp: App {
@@ -41,16 +47,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var mainWindow: NSWindow?
     var cancellables = Set<AnyCancellable>()
     var dockItems: [DockItem] = [] // Global variable to hold dock item rectangles
-    private var isClickToMinimizeEnabled: Bool = { // Set isClickToMinimizeEnabled to true if not found
+    private var isClickToMinimizeEnabled: Bool = {
         if UserDefaults.standard.object(forKey: "ClickToMinimizeEnabled") == nil {
-            UserDefaults.standard.set(true, forKey: "ClickToMinimizeEnabled") // Set default value
+            UserDefaults.standard.set(true, forKey: "ClickToMinimizeEnabled")
             return true
         }
         return UserDefaults.standard.bool(forKey: "ClickToMinimizeEnabled")
-    }() 
+    }()
     var appDict: [String: String] = [:]
-    var currentVersion: String = "" // Add this line to define currentVersion
-    private var debounceTimer: Timer?
+    var currentVersion: String = ""
+    private var dockUpdateTask: DispatchWorkItem?
      
     @objc func quitApp() {
         NSApplication.shared.terminate(self)
@@ -97,14 +103,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         center.addObserver(self, selector: #selector(dockChanged), name: NSWorkspace.didTerminateApplicationNotification, object: nil)
         center.addObserver(self, selector: #selector(dockChanged), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
 
-        registerLoginItem() // Register the helper application as a login item
+        if launchAtLoginEnabled {
+            registerLoginItem()
+        }
         setupAppDict()
         setupEventTap()
-        
-        print("Application did finish launching")
-        
-        // Initial load of dock items
+
+        log.info("Click2Minimize launched")
         updateDockItems()
+    }
+
+    /// Whether the user has opted in to launch-at-login. Default: false.
+    /// Was unconditionally enabled in older builds; respect existing state.
+    var launchAtLoginEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "LaunchAtLoginEnabled") == nil { return false }
+            return UserDefaults.standard.bool(forKey: "LaunchAtLoginEnabled")
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "LaunchAtLoginEnabled")
+            do {
+                if newValue {
+                    if SMAppService.mainApp.status != .enabled { try SMAppService.mainApp.register() }
+                } else {
+                    if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
+                }
+            } catch {
+                log.error("launch-at-login toggle failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     @objc func dockChanged(notification: Notification) {
@@ -113,24 +140,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func updateDockItems() {
-        // Check if the debounce timer is already running
-        if debounceTimer == nil {
-            // Create a new timer that will reset the debounce period
-            debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
-                self?.debounceTimer = nil // Reset the timer
-            }
-            
-            // Perform the update immediately
-            performDockUpdate()
-        }
+        // Trailing-edge debounce: coalesce bursts of dock-changed events
+        // (launch / activate / space change all fire together) into a single
+        // AppleScript query.
+        dockUpdateTask?.cancel()
+        let task = DispatchWorkItem { [weak self] in self?.performDockUpdate() }
+        dockUpdateTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: task)
     }
 
     private func performDockUpdate() {
-        // Call getDockRects() to update the global dockItems variable
-        getDockRects().sink { dockItems in
-            self.dockItems = dockItems ?? []
+        getDockRects().sink { [weak self] dockItems in
+            self?.dockItems = dockItems ?? []
         }.store(in: &cancellables)
-        print("-- performDockUpdate --")
+        log.debug("dock items refreshed")
     }
 
     func setupAppDict() {
@@ -154,65 +177,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque() // Pass the AppDelegate as userInfo
         ) else {
-            print("Failed to create event tap")
+            log.error("failed to create event tap — accessibility permission missing?")
             return
         }
 
-        // Create the run loop source with the event tap
         let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
 
-        // Store the event tap reference
         self.eventTap = eventTap
-        print("Event tap created successfully")
+        log.info("event tap installed")
     }
 
     static func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent?, appDelegate: AppDelegate) -> Unmanaged<CGEvent>? {
         guard let event = event else { return nil }
-        
-        // Skip if not enabled, during change, or if the active application is in fullscreen
-        if !appDelegate.isClickToMinimizeEnabled || appDelegate.isActiveAppFullscreen() {
-            return Unmanaged.passUnretained(event) // Allow the event to pass through
-        }
-        
-        let mouseLocation = event.location
-        var shouldSuppressEvent = false // Track if the event should be suppressed
 
-        // Check if the mouse is over any dock item using the global dockItems variable
-        for dockItem in appDelegate.dockItems {
-            if dockItem.rect.contains(mouseLocation) {
-                // Log the mouse location and app name
-                print("Mouse Location: \(mouseLocation), App Name: \(dockItem.appID)")
-                if "Launchpad||Trash||Downloads".contains(dockItem.appID) {
-                    // these are not working for sure
-                    return Unmanaged.passUnretained(event)
-                }
-                // Find the running application by name using NSWorkspace
-                let runningApps = NSWorkspace.shared.runningApplications
-                if let app = runningApps.first(where: { $0.localizedName == dockItem.appID
-                    || $0.localizedName == appDelegate.appDict[dockItem.appID] }) {
-                    print("App isHidden: \(app.isHidden), isActive: \(app.isActive)")
-                    // Check if it's active and has unminimized windows
-                    if app.isActive && !app.isHidden {
-                        let minimized = AppDelegate.minimizeAppWindows(for: app)
-                        if minimized {
-                            print("App windows minimized for: \(app.localizedName ?? "Unknown")")
-                            shouldSuppressEvent = true
-                        } else {
-                            shouldSuppressEvent = false
-                        }
-                    } else {
-                        shouldSuppressEvent = false
-                    }
-                } else {
-                    // Print all running applications' localized names
-                    let runningAppNames = runningApps.map { $0.localizedName ?? "Unknown" }
-                    print("No running application found with name: \(dockItem.appID).\nRunning apps: \(runningAppNames.joined(separator: " | "))")
-                }
-            }
+        // Pass-through if disabled or the frontmost app is fullscreen.
+        if !appDelegate.isClickToMinimizeEnabled || appDelegate.isFrontmostAppFullscreen() {
+            return Unmanaged.passUnretained(event)
         }
-        
-        return shouldSuppressEvent ? nil : Unmanaged.passUnretained(event)
+
+        let mouseLocation = event.location
+
+        guard let dockItem = appDelegate.dockItems.first(where: { $0.rect.contains(mouseLocation) }) else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        if ignoredDockItems.contains(dockItem.appID) {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let runningApps = NSWorkspace.shared.runningApplications
+        guard let app = runningApps.first(where: {
+            $0.localizedName == dockItem.appID || $0.localizedName == appDelegate.appDict[dockItem.appID]
+        }) else {
+            log.debug("no running application matched dock item: \(dockItem.appID, privacy: .public)")
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Only minimize when the user clicks the dock icon of the already-active app
+        // (matching the Windows-taskbar behaviour). Otherwise let the default click through.
+        guard app.isActive && !app.isHidden else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let minimized = AppDelegate.minimizeAppWindows(for: app)
+        if minimized {
+            log.debug("minimized windows for: \(app.localizedName ?? "Unknown", privacy: .public)")
+            return nil
+        }
+        return Unmanaged.passUnretained(event)
     }
 
     static func minimizeAppWindows(for app: NSRunningApplication) -> Bool {
@@ -239,17 +252,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return minimizedAny
     }
 
-    private func isActiveAppFullscreen() -> Bool {
-        // Get the list of windows for the active application
-        let windows = NSApplication.shared.windows.filter { $0.isVisible && $0.isKeyWindow }
-        
-        // Check if any window is in fullscreen mode
+    /// True if the frontmost (non-Click2Minimize) app has at least one fullscreen window.
+    /// We don't want to click-minimize a fullscreen window — that interrupts the user.
+    private func isFrontmostAppFullscreen() -> Bool {
+        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return false }
+        let element = AXUIElementCreateApplication(frontApp.processIdentifier)
+
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement] else {
+            return false
+        }
+
         for window in windows {
-            if window.styleMask.contains(.fullSizeContentView) {
+            var fullscreenRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &fullscreenRef) == .success,
+               let isFullscreen = fullscreenRef as? Bool, isFullscreen {
                 return true
             }
         }
-        
         return false
     }
 
@@ -283,8 +304,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 var error: NSDictionary?
                 if let appleScript = NSAppleScript(source: script) {
                     let result = appleScript.executeAndReturnError(&error)
-                    if error != nil {
-                        print("Error executing AppleScript: \(String(describing: error))")
+                    if let error = error {
+                        log.error("AppleScript error: \(String(describing: error), privacy: .public)")
                         promise(.success(nil))
                         return
                     }
@@ -324,12 +345,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func registerLoginItem() {
         do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
+            if SMAppService.mainApp.status != .enabled {
+                try SMAppService.mainApp.register()
             }
-            try SMAppService.mainApp.register()
         } catch {
-            print("Error setting login item: \(error.localizedDescription)")
+            log.error("registerLoginItem: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -382,7 +402,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let url = URL(string: "https://api.github.com/repos/hatimhtm/Click2Minimize/releases/latest")!
         let task = URLSession.shared.dataTask(with: url) { data, response, error in
             guard let data = data, error == nil else {
-                print("Error fetching updates: \(error?.localizedDescription ?? "Unknown error")")
+                log.error("checkForUpdates: \(error?.localizedDescription ?? "unknown error", privacy: .public)")
                 return
             }
             if let releaseInfo = try? JSONDecoder().decode(Release.self, from: data) {
@@ -430,7 +450,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let url = URL(string: "https://api.github.com/repos/hatimhtm/Click2Minimize/releases/latest")!
         let task = URLSession.shared.dataTask(with: url) { data, response, error in
             guard let data = data, error == nil else {
-                print("Error fetching release info: \(error?.localizedDescription ?? "Unknown error")")
+                log.error("fetchLatestDMG: \(error?.localizedDescription ?? "unknown error", privacy: .public)")
                 return
             }
             
@@ -451,59 +471,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func downloadDMG(from urlString: String) {
         guard let url = URL(string: urlString) else { return }
-        
+
         let task = URLSession.shared.downloadTask(with: url) { localURL, response, error in
             guard let localURL = localURL, error == nil else {
-                print("Error downloading DMG: \(error?.localizedDescription ?? "Unknown error")")
-                // Open the browser link for manual upgrade
+                log.error("downloadDMG: \(error?.localizedDescription ?? "unknown error", privacy: .public)")
                 self.openBrowserForManualUpgrade()
                 return
             }
-            
-            // Mount the DMG
+
             let mountTask = Process()
             mountTask.launchPath = "/usr/bin/hdiutil"
             mountTask.arguments = ["attach", localURL.path]
 
             mountTask.terminationHandler = { process in
                 if process.terminationStatus == 0 {
-                    // Get the mounted volume path
-                    let mountedVolumePath = "/Volumes/Click2Minimize" // Adjust this if the volume name is different
-                    let appDestinationURL = URL(fileURLWithPath: "/Applications/Click2Minimize.app") // Change to /Applications
+                    let mountedVolumePath = "/Volumes/Click2Minimize"
+                    let appDestinationURL = URL(fileURLWithPath: "/Applications/Click2Minimize.app")
 
                     do {
-                        // Copy the app to the /Applications folder
-                        let appSourceURL = URL(fileURLWithPath: "\(mountedVolumePath)/Click2Minimize.app") // Adjust if necessary
+                        let appSourceURL = URL(fileURLWithPath: "\(mountedVolumePath)/Click2Minimize.app")
                         if FileManager.default.fileExists(atPath: appDestinationURL.path) {
-                            try FileManager.default.removeItem(at: appDestinationURL) // Remove old version if it exists
+                            try FileManager.default.removeItem(at: appDestinationURL)
                         }
                         try FileManager.default.copyItem(at: appSourceURL, to: appDestinationURL)
-                        print("Successfully installed Click2Minimize to /Applications.")
-                        
-                        // Prompt the user to relaunch the app
-                        DispatchQueue.main.async {
-                            self.promptUserToRelaunch()
-                        }
-                        
+                        log.info("installed Click2Minimize to /Applications")
+
+                        DispatchQueue.main.async { self.promptUserToRelaunch() }
                     } catch {
-                        print("Error copying app to /Applications: \(error.localizedDescription)")
-                        // Open the browser link for manual upgrade
+                        log.error("copy to /Applications failed: \(error.localizedDescription, privacy: .public)")
                         self.openBrowserForManualUpgrade()
                     }
 
-                    // Unmount the DMG
                     let unmountTask = Process()
                     unmountTask.launchPath = "/usr/bin/hdiutil"
                     unmountTask.arguments = ["detach", mountedVolumePath]
                     unmountTask.launch()
                     unmountTask.waitUntilExit()
                 } else {
-                    print("Failed to mount DMG.")
-                    // Open the browser link for manual upgrade
+                    log.error("failed to mount DMG")
                     self.openBrowserForManualUpgrade()
                 }
             }
-            
+
             mountTask.launch()
         }
         task.resume()
@@ -524,11 +533,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
-            // Relaunch the app
-            NSWorkspace.shared.launchApplication("/Applications/Click2Minimize.app")
+            let appURL = URL(fileURLWithPath: "/Applications/Click2Minimize.app")
+            NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
         }
-        
-        // Delay termination by 1 second
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             NSApplication.shared.terminate(nil)
         }

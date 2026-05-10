@@ -1,87 +1,139 @@
-<div align="center">
-  <img src="https://img.shields.io/badge/Click2Minimize-Window%20Management-FA7343?style=for-the-badge&logo=apple&logoColor=white" alt="Click2Minimize">
-  
-  <h1>🖱️ Click2Minimize</h1>
-  <p><strong>A seamless enhancement to native macOS window management</strong></p>
-  <p>A sleek, highly-polished accessibility utility designed to refine the dock interaction experience on macOS. This application modifies standard system behavior, allowing users to minimize windows simply by clicking their application icon in the Dock—a quality-of-life improvement heavily requested by power users.</p>
-  <br>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/hero-banner-dark.svg" />
+    <img src="assets/hero-banner.svg" alt="Click2Minimize" width="100%" />
+  </picture>
+</p>
 
-  ![Swift](https://img.shields.io/badge/Swift-5.0-FA7343?logo=swift&logoColor=white)
-  ![macOS](https://img.shields.io/badge/macOS-13.0+-000000?logo=apple&logoColor=white)
-  ![Xcode](https://img.shields.io/badge/Xcode-15-147EFB?logo=xcode&logoColor=white)
-  ![License](https://img.shields.io/badge/License-MIT-green)
-  
-  <br>
-  
-  > 🚧 **Work In Progress**: I am actively working on making Click2Minimize better day after day. Expect frequent updates and improvements!
-</div>
+<p align="center">
+  <a href="https://github.com/hatimhtm/Click2Minimize/releases/latest"><img src="https://img.shields.io/github/v/release/hatimhtm/Click2Minimize?style=for-the-badge&label=DOWNLOAD&labelColor=1A1A1A&color=CCFF00" alt="Latest release" /></a>
+  <img src="https://img.shields.io/badge/macOS-13.0+-1A1A1A?style=for-the-badge&logo=apple&logoColor=CCFF00" alt="macOS 13+" />
+  <img src="https://img.shields.io/badge/Swift-5-1A1A1A?style=for-the-badge&logo=swift&logoColor=CCFF00" alt="Swift 5" />
+  <img src="https://img.shields.io/badge/Xcode-16-1A1A1A?style=for-the-badge&logo=xcode&logoColor=CCFF00" alt="Xcode 16" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/LICENSE-POLYFORM_NC-1A1A1A?style=for-the-badge&labelColor=1A1A1A&color=CCFF00" alt="PolyForm Noncommercial" /></a>
+</p>
 
----
-
-## 🎨 Design Philosophy
-
-This project brings an elegant and native-feeling window management feature to macOS, focusing on zero-friction interactions.
--   **Native Integration:** Operates entirely in the background using minimal system resources.
--   **Accessibility Driven:** Utilizes powerful `AXUIElement` permissions to securely interact with the macOS Window Server.
--   **Cross-platform Support:** Equipped with an AppleScript fallback to handle modern Mac Catalyst and Electron applications perfectly.
-
-## 🛠️ Tech Stack
-
-| Category | Technologies |
-|----------|--------------|
-| **Core** | Swift 5.0, AppleScript |
-| **Frameworks** | Cocoa, ApplicationServices, Combine |
-| **Tooling** | Xcode 15 |
-| **OS Target** | macOS 13.0+ |
-
-## 🚀 Features
-
--   **Dock Minimization:** Click any active application's icon in the Dock to smoothly minimize all its visible windows.
--   **Smart Un-Minimize:** Naturally integrates with the default macOS behavior to un-minimize windows upon the next click.
--   **Universal Compatibility:** Gracefully handles stubborn cross-platform applications with robust fallback engines.
--   **Auto-Updater Disabled:** Removed external dependencies to ensure a stable, offline, and reliable local build.
+<p align="center">
+  <em><strong>Click an app's dock icon to minimize its windows.</strong> macOS doesn't ship with this behaviour by default — Click2Minimize is a ~570-LOC Swift menu-bar utility that adds it. Accessory app, no window, no telemetry. Lives in the menu bar, runs an event tap, talks to the dock via Accessibility + AppleScript. Free to use personally — not for commercial reuse (see <a href="LICENSE">LICENSE</a>).</em>
+</p>
 
 ---
 
-## 📦 Installation
+### `/// WHAT IT DOES`
 
-To install Click2Minimize directly on your Mac:
+When you click the dock icon of an already-focused app, macOS does nothing — the click just re-activates an app that's already active. Click2Minimize swaps that no-op for the obvious behaviour: minimize the app's windows. Click again to bring them back. Like the Windows taskbar, but on macOS.
 
-1.  **Download the latest Release**
-    Grab the `.dmg` file from the [Releases page](../../releases/latest).
-
-2.  **Install the App**
-    Drag the app into your `/Applications` folder.
-
-3.  **Grant Permissions**
-    When launched, the app will request Accessibility Permissions. Open System Settings > Privacy & Security > Accessibility and toggle it on.
+- Click a **focused** app's dock icon → windows minimize.
+- Click an **unfocused** app's icon → default macOS behaviour (focus, raise).
+- Click **Launchpad / Trash / Downloads** → default behaviour (these have no windows to minimize).
+- App is **fullscreen** → pass-through (no minimize, you didn't mean it).
 
 ---
 
-## 💻 Build from Source
+### `/// HOW IT WORKS`
 
-To compile the application locally:
+```
+                                                 ┌─────────────────────┐
+                                                 │ NSWorkspace notifs  │
+                                                 │  (launch · activate │
+                                                 │   · space change)   │
+                                                 └──────────┬──────────┘
+                                                            │ debounced 300ms
+                                                            ▼
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────────────┐
+│ CGEvent tap     │───▶│ hit-test mouse  │───▶│ AppleScript query Dock  │
+│ (left mousedown)│    │ vs dock rects   │    │ → rects + app names     │
+└─────────────────┘    └─────────────────┘    └─────────────────────────┘
+                                │
+                                ▼
+              ┌─────────────────────────────────────────┐
+              │ AXUIElement → set kAXMinimized = true   │
+              │ on every visible window of the app      │
+              └─────────────────────────────────────────┘
+```
+
+- **Event tap** runs at `cghidEventTap` / `tailAppendEventTap`, captures left mouse-down only.
+- **Dock rects** are cached and refreshed on a trailing-edge 300ms debounce — bursts of `didLaunch / didActivate / activeSpaceDidChange` collapse into a single AppleScript call.
+- **Window minimization** goes through `AXUIElementSetAttributeValue(kAXMinimizedAttribute)` — the proper accessibility API, not key-event simulation.
+- **Fullscreen detection** reads `AXFullScreen` on the frontmost app's windows (rewritten in 1.5 — the old check was inspecting Click2Minimize's own windows).
+
+---
+
+### `/// HIGHLIGHTS`
+
+| | |
+|---|---|
+| **No window** | `LSUIElement`-style accessory app; lives only in the menu bar |
+| **No telemetry** | Zero network calls except the GitHub releases check on launch |
+| **No background daemon** | Just one process, registers a `CGEvent` tap via Accessibility |
+| **Modern Swift logging** | `os.Logger` with subsystem + privacy modifiers; no `print()` spam in Release |
+| **Opt-in launch-at-login** | SwiftUI toggle wires `SMAppService.mainApp` register/unregister; was unconditional before 1.5 |
+| **Fallback dock scan** | If `AXUIElement` can't read the dock list, an AppleScript fallback recovers app names from `System Events` |
+| **Universal binary** | `xcodebuild -configuration Release` produces arm64 + x86_64; ad-hoc signed DMG |
+| **Source-available** | PolyForm Noncommercial 1.0.0 — read it, learn from it, run it personally, don't ship it |
+
+---
+
+### `/// 1.5 — WHAT CHANGED FROM 1.4`
+
+- **Fixed**: `isActiveAppFullscreen()` was inspecting Click2Minimize's own NSWindows — always returned false. Rewritten to read `AXFullScreen` on the frontmost app via Accessibility.
+- **Fixed**: dock-item ignore-list was `"Launchpad||Trash||Downloads".contains(name)` — substring match, would catch "TrashCan" or any app with "Trash" in the name. Replaced with proper `Set` membership.
+- **Fixed**: dock-update debounce was firing every event and only suppressing later ones inside the 0.5s window — it never actually coalesced bursts. Rewritten with `DispatchWorkItem` trailing-edge debounce at 300ms.
+- **Improved**: all `print()` calls migrated to `os.Logger` with privacy modifiers. Release builds no longer write to stdout.
+- **Improved**: launch-at-login is now an opt-in toggle in Settings instead of unconditional. Existing installs that were auto-registered stay registered until toggled off.
+- **Improved**: settings sheet redesigned — launch-at-login row, cleaner spacing, footnote anchored.
+- **Improved**: deprecated `NSWorkspace.launchApplication(_:)` swapped for `openApplication(at:configuration:completionHandler:)`.
+- **Bumped**: marketing version 1.4 → 1.5.
+
+---
+
+### `/// INSTALL`
+
+1. Grab the latest `.dmg` from [Releases](../../releases/latest).
+2. Open it, drag `Click2Minimize.app` into `/Applications`.
+3. Launch it. You'll be prompted for **Accessibility** permission — open System Settings → Privacy & Security → Accessibility, toggle Click2Minimize on.
+4. If you use Catalyst / Electron apps and want the fallback to work cleanly, also grant **Automation** (asked on first need).
+
+The DMG is ad-hoc signed, so the first launch will need a right-click → Open to get past Gatekeeper.
+
+---
+
+### `/// BUILD FROM SOURCE`
 
 ```bash
 git clone https://github.com/hatimhtm/Click2Minimize.git
 cd Click2Minimize
 
-# Build the release binary
-xcodebuild -scheme "Click2Hide" -configuration Release -derivedDataPath build
+# Release build into ./build
+xcodebuild -scheme Click2Minimize -configuration Release -derivedDataPath build
 
-# Package it into a DMG
+# Or build the full DMG in ./dist
 ./build_dmg.sh
 ```
 
+Requires Xcode 15+. Targets macOS 13.0+.
+
 ---
 
-## 🤝 Let's Connect
+### `/// LICENSE`
 
-<div align="center">
-  <p><sub>Built with ❤️ for power users everywhere</sub></p>
-  
-  [![Portfolio](https://img.shields.io/badge/Portfolio-hatimelhassak.is--a.dev-000000?style=flat-square&logo=vercel&logoColor=white)](https://hatimelhassak.is-a.dev)
-  [![LinkedIn](https://img.shields.io/badge/LinkedIn-Hatim%20El%20Hassak-0077B5?style=flat-square&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/hatim-elhassak/)
-  [![Email](https://img.shields.io/badge/Email-hatimelhassak.official@gmail.com-D14836?style=flat-square&logo=gmail&logoColor=white)](mailto:hatimelhassak.official@gmail.com)
-  [![BuyMeACoffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=flat-square&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/hatimelhassak)
-</div>
+[PolyForm Noncommercial 1.0.0](LICENSE). In plain English:
+
+- **Allowed**: reading, learning, personal use, hobby use, non-profit / educational / research use, forking to improve, distributing your fork under the same license.
+- **Not allowed**: shipping it inside a paid product, selling support for it, embedding it in commercial software, any commercial use.
+
+If you want a commercial license, [open an issue](../../issues) or [book a call](https://cal.com/hatimelhassak/engineering-discovery).
+
+---
+
+<p align="center">
+  <a href="https://hatimelhassak.is-a.dev"><img src="https://img.shields.io/badge/PORTFOLIO-1A1A1A?style=for-the-badge&logo=vercel&logoColor=CCFF00" alt="Portfolio" /></a>
+  <a href="https://cal.com/hatimelhassak/engineering-discovery"><img src="https://img.shields.io/badge/BOOK_A_CALL-CCFF00?style=for-the-badge&logo=googlecalendar&logoColor=1A1A1A" alt="Book a call" /></a>
+  <a href="https://www.linkedin.com/in/hatim-elhassak/"><img src="https://img.shields.io/badge/LINKEDIN-1A1A1A?style=for-the-badge&logo=linkedin&logoColor=CCFF00" alt="LinkedIn" /></a>
+  <a href="mailto:hatimelhassak.official@gmail.com"><img src="https://img.shields.io/badge/EMAIL-1A1A1A?style=for-the-badge&logo=gmail&logoColor=CCFF00" alt="Email" /></a>
+  <a href="https://buymeacoffee.com/hatimelhassak"><img src="https://img.shields.io/badge/BUY_ME_A_COFFEE-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=1A1A1A" alt="Buy Me A Coffee" /></a>
+</p>
+
+<p align="center">
+  <code>///&nbsp;&nbsp;OPEN FOR NEW WORK&nbsp;&nbsp;///&nbsp;&nbsp;CONTRACT &amp; FREELANCE&nbsp;&nbsp;///&nbsp;&nbsp;REMOTE WORLDWIDE&nbsp;&nbsp;///</code>
+</p>

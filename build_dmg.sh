@@ -14,8 +14,10 @@ mkdir -p build
 # Clean previous builds
 xcodebuild clean -scheme "$APP_NAME" -derivedDataPath build
 
-# Build the app using xcodebuild for both arm64 and x86_64 architectures
-if ! xcodebuild -scheme "$APP_NAME" -configuration Release -derivedDataPath build; then
+# Build a universal binary (arm64 + x86_64) — ONLY_ACTIVE_ARCH=NO forces both
+# slices on Intel hosts that would otherwise produce x86_64-only.
+if ! xcodebuild -scheme "$APP_NAME" -configuration Release -derivedDataPath build \
+    ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO; then
   echo "Build failed. Exiting."
   exit 1
 fi

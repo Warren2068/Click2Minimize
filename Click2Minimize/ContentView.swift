@@ -1,33 +1,68 @@
 import SwiftUI
+import ServiceManagement
 
 struct ContentView: View {
     @Environment(\.presentationMode) var presentationMode
+
     @State private var isClickToMinimizeEnabled: Bool = {
         if UserDefaults.standard.object(forKey: "ClickToMinimizeEnabled") == nil {
-            UserDefaults.standard.set(true, forKey: "ClickToMinimizeEnabled") // Set default value
+            UserDefaults.standard.set(true, forKey: "ClickToMinimizeEnabled")
             return true
         }
         return UserDefaults.standard.bool(forKey: "ClickToMinimizeEnabled")
     }()
-    
+
+    @State private var launchAtLogin: Bool = {
+        if UserDefaults.standard.object(forKey: "LaunchAtLoginEnabled") == nil { return false }
+        return UserDefaults.standard.bool(forKey: "LaunchAtLoginEnabled")
+    }()
+
     var body: some View {
-        VStack(spacing: 2) {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Click2Minimize")
+                .font(.headline)
+                .padding(.top, 4)
+
+            Divider()
+
             Toggle("Enable Click2Minimize", isOn: $isClickToMinimizeEnabled)
-                .padding()
-                // .toggleStyle(SwitchToggleStyle(tint: .blue)) // this breaks intel mac
                 .onChange(of: isClickToMinimizeEnabled) { newValue in
                     UserDefaults.standard.set(newValue, forKey: "ClickToMinimizeEnabled")
-                    NotificationCenter.default.post(name: NSNotification.Name("ClickToHideStateChanged"), object: newValue)
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("ClickToHideStateChanged"),
+                        object: newValue
+                    )
                 }
 
-            Text("*If the app doesn't work as expected, please ensure that accessibility and automation permissions are enabled via app's menubar menu.")
-                .font(.footnote)
-                .padding(15)   
-                .foregroundColor(.orange) // Optional: Change color to red for emphasis
-                .multilineTextAlignment(.center) 
-        }
-        .frame(width: 240, height: 150)
+            Toggle("Launch at login", isOn: $launchAtLogin)
+                .onChange(of: launchAtLogin) { newValue in
+                    UserDefaults.standard.set(newValue, forKey: "LaunchAtLoginEnabled")
+                    do {
+                        if newValue {
+                            if SMAppService.mainApp.status != .enabled {
+                                try SMAppService.mainApp.register()
+                            }
+                        } else {
+                            if SMAppService.mainApp.status == .enabled {
+                                try SMAppService.mainApp.unregister()
+                            }
+                        }
+                    } catch {
+                        // Roll the toggle back on failure
+                        launchAtLogin = !newValue
+                        UserDefaults.standard.set(!newValue, forKey: "LaunchAtLoginEnabled")
+                    }
+                }
 
+            Divider()
+
+            Text("If the app doesn't work, enable Accessibility and Automation permissions from the menu-bar menu.")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(width: 280)
     }
 }
-
